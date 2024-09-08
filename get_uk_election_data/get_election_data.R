@@ -2,6 +2,8 @@
 # Todo add 2024
 
 
+
+
 # First we'll deal with the historical data from 1918-2019
 # https://commonslibrary.parliament.uk/research-briefings/cbp-8647/
 
@@ -12,47 +14,110 @@ library(readxl)
 library(tidyverse)
 library(janitor)
 
-election_results <- read_excel("1918-2019election_results_by_pcon.xlsx", sheet = "2019", skip = 1)
+# First we need to import the historic Excel data
+# It comes in an Excel file with 1 sheet per election.
 
-# First use the first row as column names if there are any
+historic_results_file <- "1918-2019election_results_by_pcon.xlsx"
 
-election_results_clean <- election_results
-election_results_clean <- row_to_names(election_results, row_number = 1, remove_row = TRUE) |>
-  clean_names()
+# Get the names of the sheets in that file
 
-# remove cols that are all NA
+historic_sheet_names <- excel_sheets(historic_results_file)
 
-election_results_clean <- election_results_clean |>
-  select_if(~ !all(is.na(.)))
+# The first sheet concerns university seats. I'm not interested in those at the moment
 
-# Remove cols where the first value is vote share.
-# We can calculate this from the rest of the data if we need it later
+historic_sheet_names <- historic_sheet_names[historic_sheet_names != "University Seats"]
 
-election_results_clean <- election_results_clean[, !unlist(election_results_clean[1, ]) %in% c("Vote share", "Votes Share")]
+# Now, we want to iterate through each sheet name and process the relevant parts of the results into a nice tidy dataframe
 
-# Now if the name of the field starts with na we make it the first row value:
+# Initialise a data frame to store the final results
+historic_election_results <- data.frame()
 
-# Loop through the columns
-for (i in seq_along(election_results_clean)) {
-  # Check if the column name starts with "na"
-  if (startsWith(colnames(election_results_clean)[i], "na")) {
-    # Set the column name to the first value in the column
-    colnames(election_results_clean)[i] <- election_results_clean[1, i]
+# Now iterate through each sheet name
+
+for (sheet in historic_sheet_names)
+{
+  # Get the contents of the current sheet
+  print(sheet)
+
+  election_results <- read_excel(historic_results_file, sheet = sheet, skip = 1)
+
+  # Initialise a variable we can manipulate to get a clean dataset to match the data we just read in
+  # (not strictly necessary but it also does no harm - might make debugging any problems easier)
+
+  election_results_clean <- election_results
+
+  # Use the first row as column names, where a value exists
+
+  election_results_clean <- row_to_names(election_results, row_number = 1, remove_row = TRUE) |>
+    clean_names()
+
+  # remove cols that are all NA
+
+  election_results_clean <- election_results_clean |>
+    select_if(~ !all(is.na(.)))
+
+  # Remove cols where the first value is vote share.
+  # We can calculate this from the rest of the data if we need it later
+
+  election_results_clean <- election_results_clean[, !unlist(election_results_clean[1, ]) %in% c("Vote share", "Votes Share")]
+
+  # Now if the name of the field is "na" starts with na_ we rename it to the value in the first row.
+  # We can't just look for "starts with na" because sometimes legitimate party names start with those letters.
+
+  # Loop through the columns
+  for (i in seq_along(election_results_clean)) {
+    # Check if the column name starts with "na_" or is exactly "na"
+    if (startsWith(colnames(election_results_clean)[i], "na_") | colnames(election_results_clean)[i] == "na") {
+      # Set the column name to the first value in the column
+      colnames(election_results_clean)[i] <- election_results_clean[1, i]
+    }
   }
+
+  # Ensure the column names are 'safe' per R's rules
+
+  election_results_clean <- clean_names(election_results_clean)
+
+  # Remove first row now we extracted it as column names
+
+  election_results_clean <- election_results_clean[-1, ]
+
+  # Remove any rows with no constituency name. These are usually blank rows or interpretation notes
+
+  election_results_clean <- filter(election_results_clean, !is.na(constituency))
+
+  # Any column names that at this stage still start with "na_" or are exactly "na" are random notes or other such data we'll not keep in our dataset
+
+  election_results_clean <- select(election_results_clean, -starts_with("na_"), -any_of(c("na")))
+
+
+  # Now we pivot it to a long version where the per-party results are transformed from columns into rows
+  # And we move any rows with null votes - these will be constituencies where the relevant party didn't field a candidate.
+
+  # Annoyingly, some sheet data contains different field names to other in terms of the columns that don't relate to a party
+
+
+  election_results_clean_long <- election_results_clean |>
+    pivot_longer(
+      cols = -any_of(c("id", "constituency", "county", "country", "country_region", "seats", "electorate", "total_votes", "turnout", "ons_id")), # this are the columns that don't relate to party - not all of them appear in each year's sheet
+      names_to = "party",
+      values_to = "votes"
+    ) |>
+    filter(!is.na(votes))
+
+  # Add a field to keep track of which election these results are from. This is based on the sheet name we read in.
+
+  election_results_clean_long <- election_results_clean_long |>
+    mutate(election = sheet)
+
+  # Now we can append our long, clean results from this sheet to the final dataset
+
+  historic_election_results <- bind_rows(
+    historic_election_results,
+    election_results_clean_long
+  )
 }
 
-# Ensure the column names are 'safe' per R's rules
+# Check only legitimate party names made the cut
 
-election_results_clean <- clean_names(election_results_clean)
-
-# Remove first row now we extracted it as column names
-
-election_results_clean <- election_results_clean[-1, ]
-
-
-# Now we pivot it to a long version where the per-party results are transformed from columns into rows
-# And we move any rows with null votes - these will be constituencies where the relevant party didn't field a candidate.
-
-election_results_clean_long <- election_results_clean |>
-  pivot_longer(cols = 7:19, names_to = "party", values_to = "votes") |>
-  filter(!is.na(votes))
+select(historic_election_results, party) |>
+  distinct()
